@@ -1,87 +1,118 @@
 import java.io.*;
 import java.net.*;
-import java.util.Scanner;
+import java.util.ArrayList;
 
 class PartialHTTP1Server {
+	
+	/*public void poolManager(){
+		
+	}*/
 
-	public void main (String args[]) throws IOException{
+	public static void main (String args[]) throws IOException{
 		int portID = Integer.parseInt(args[0]);
-		Thread mainThread = null;
 		
 		ServerSocket server = new ServerSocket(portID);
 		Socket connection;
+		boolean connected = true;
+		ArrayList<Socket> pool = new ArrayList(5);
 		
-		Scanner sc = new Scanner(System.in);
+		server.setSoTimeout(3000);
 		
-		String hostname = sc.next();
-		
-		int clientPort = sc.nextInt();
-		
-		Socket client = new Socket(hostname, clientPort);
-		
-		if (clientPort == portID){
-			connection = server.accept();
-			//Is it the actual client or is connection right?
-			if(!mainThread.addToPool(connection)){
-				System.out.println("503 Service Unavailable");
-				//Not sure if I should do this too - client.close();
-				connection.close();
+		while (connected){
+			try {
+				connection = server.accept();
+				PrintWriter output = new PrintWriter(connection.getOutputStream(), true);
+				if(pool.size() == 50){
+					output.println("503 Service Unavailable");
+						//Not sure if I should do this too - client.close();
+					connection.close();
+				} else {
+					synchronized (pool) {
+						pool.add(connection);
+						Channel mainThread = new Channel(connection, pool);
+						mainThread.start();
+					}
+				}
+			} catch (IOException e) {
+				//Figure out how to connect this to output
+				connected = false;
+				System.out.println("HTTP/1.0 500 Internal Server Error");
 			}
 		}
+		server.close();
 	}
 }
 
-class Thread{
-	//stores all of the threads >>> list, queue, or linked list of linked lists
-	Socket [] pool;
-	int active = 0;
-	Scanner scanned = new Scanner(System.in);
+class Channel extends Thread{
+
+	//Use actual thread pool
+	Socket current;
+	ArrayList<Socket> pool;
 	
-	public boolean addToPool (Socket connect){
-		//replace with chosen data structure
-		if (active < 50){
-			pool[active] = connect;
-			active++;
-			return true;
-		} else {
-			return false;
-		}
+	//Maybe include the pool so that you can remove the connection?
+	Channel (Socket in, ArrayList<Socket> pooled){
+		current = in;
+		pool = pooled;
 	}
 	
 	//Should actually be run?
-	public void runner () throws IOException{
+	public void run (){
 		//Reviews command from command line for socket
-		Socket current = pool[active];
+		PrintWriter output;
+		BufferedReader input;
 		//Skips the first one in the array for now
-		while (active != 0){
-			scanned = new Scanner(current.getInputStream());
-			String com = scanned.nextLine();
-			String[] command = com.split(" ");
-			
-			//Might have to double check on the length portion in cases of since modified
-			//If command guarantees that it will not go further in checking if the request format is incorrect
-			if (!command[2].startsWith("HTTP/") || !command[1].startsWith("/") || command.length != 3){
-				System.out.println("HTTP/1.0 400 Bad Request");
-			} else {
-				//deal with cases when there is something besides a number afterwards
-				double version = 0.0;
-				try {
-					version = Double.parseDouble(command[2].substring(5));
-				} catch (Exception e){
-					System.out.println("HTTP/1.0 400 Bad Request");
+		try {
+				output = new PrintWriter(current.getOutputStream(), true);
+				input = new BufferedReader(new InputStreamReader(current.getInputStream()));
+				String com = input.readLine();
+				String[] command = com.split(" ");
+				
+				//Might have to double check on the length portion in cases of since modified
+				//If command guarantees that it will not go further in checking if the request format is incorrect
+				if (!command[2].startsWith("HTTP/") || !command[1].startsWith("/") || command.length != 3){
+					output.println("HTTP/1.0 400 Bad Request");
+				} else {
+					//deal with cases when there is something besides a number afterwards
+					double version = 0.0;
+					try {
+						version = Double.parseDouble(command[2].substring(5));
+						if (version < 0.0 || version > 1.0){
+							output.println("HTTP/1.0 505 HTTP Version Not Supported");
+						} if (isNotImplemented(command[0])){
+							output.println("HTTP/1.0 501 Not Implemented");
+						} else if (!isImplemented(command[0])){
+							output.println("HTTP/1.0 400 Bad Request");
+						} else {
+							//see if we can get object if so
+							File looking = new File(command[1]);
+							if (looking.exists() && looking.canRead()){
+								output.println("HTTP/1.0 200 OK");
+								if (command[0].equals("GET") || command[0].equals("POST")){
+									output.print("Content-Type: " + filetype(command[0]) + "\nContent-Length: " + Long.toString(looking.length()) + "\nLast-Modified: " + looking.lastModified() + "\nContent-Encoding: identity\n");
+								}
+							} else if (!looking.canRead() && looking.exists()){
+								output.println("HTTP/1.0 403 Forbidden");
+							} else {
+								output.println("HTTP/1.0 404 Not Found");
+							}
+						}
+					} catch (Exception e){
+						output.println("HTTP/1.0 400 Bad Request");
+					}
 				}
-				if (version < 0.0 || version > 1.0){
-					System.out.println("HTTP/1.0 505 HTTP Version Not Supported");
-				} if (isNotImplemented(command[0])){
-					System.out.println("HTTP/1.0 501 Not Implemented");
-				} else if (!isImplemented(command[0])){
-					System.out.println("HTTP/1.0 400 Bad Request");
-				}
+				
+				//Auto is on, but still unsure -- output.flush();
+			} catch (Exception e){
+				e.printStackTrace();
 			}
 			
-			active--;
-			current = pool[active];
-		}
+			try {
+				pool.remove(current);
+				current.close();
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+		
 		
 	}
 	
@@ -98,6 +129,31 @@ class Thread{
 			return true;
 		}
 		return false;
+	}
+	
+	private String filetype (String s){
+		int lastSlash = s.indexOf("/");
+		int dotLocation = s.indexOf(".", lastSlash);
+		String appType = s.substring(dotLocation + 1);
+		String fullType = "";
+		switch (appType){
+			case "html":
+			case "txt":
+				fullType = "text/" + appType;
+				break;
+			case "gif":
+			case "jpeg":
+			case "png":
+				fullType = "image/" + appType;
+				break;
+			case "pdf":
+			case "x-gzip":
+			case "zip":
+				fullType = "application/" + appType;
+			default:
+				fullType = "application/octet-stream";
+		}
+		return fullType;
 	}
 	
 }
